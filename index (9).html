@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Islas de Calor - Macas</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;font-family:sans-serif;background:#f5f5f5}
+#app{display:flex;flex-direction:column;height:100vh;padding:10px;gap:8px}
+#topBar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#yearButtons{display:flex;flex-wrap:wrap;gap:6px}
+.yearBtn{padding:5px 10px;border:1px solid #aaa;border-radius:6px;background:white;cursor:pointer;font-size:13px}
+.yearBtn:hover{background:#eef}
+.yearBtn.active{font-weight:700;background:#dce8ff;border-color:#4477cc}
+.yearBtn.disabled{background:#eee;color:#aaa;cursor:not-allowed;text-decoration:line-through}
+#btnDiff{padding:5px 12px;border:1px solid #aaa;border-radius:6px;background:white;cursor:pointer;font-size:13px;white-space:nowrap}
+#btnDiff.active{font-weight:700;background:#ffe8dc;border-color:#cc4444}
+#mapWrap{position:relative;flex:1;border-radius:8px;overflow:hidden;border:1px solid #ccc;min-height:200px}
+#mapEl{width:100%;height:100%}
+#loadingMsg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:14px;color:#555;background:rgba(245,245,245,0.92);z-index:999}
+#legend{position:absolute;bottom:24px;right:10px;z-index:1000;background:rgba(255,255,255,0.92);border-radius:6px;padding:8px 10px;font-size:11px;box-shadow:0 1px 4px rgba(0,0,0,0.2);min-width:120px}
+#legendTitle{font-weight:600;margin-bottom:4px;font-size:11px;color:#333}
+#legendBar{height:10px;border-radius:3px;margin-bottom:3px}
+#legendLabels{display:flex;justify-content:space-between;font-size:10px;color:#555}
+#infoBar{font-size:12px;color:#555;min-height:16px}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topBar">
+    <div id="yearButtons"></div>
+    <button id="btnDiff">Diferencia 2015–2024</button>
+  </div>
+  <div id="infoBar"></div>
+  <div id="mapWrap">
+    <div id="loadingMsg">Cargando...</div>
+    <div id="mapEl"></div>
+    <div id="legend">
+      <div id="legendTitle">LST (°C)</div>
+      <div id="legendBar"></div>
+      <div id="legendLabels"><span id="legendMin"></span><span id="legendMid"></span><span id="legendMax"></span></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.js"></script>
+<script src="https://unpkg.com/georaster-layer-for-leaflet@4.1.2/dist/georaster-layer-for-leaflet.min.js"></script>
+<script>
+const BASE='https://danielmcs457-max.github.io/macas-lst/';
+const UNAVAILABLE=[2017,2021];
+
+// Leer parámetro de URL
+const params=new URLSearchParams(window.location.search);
+const mode=params.get('mode')||'year';
+const currentYear=parseInt(params.get('year'))||2015;
+
+function navigate(year, m){
+  const p=new URLSearchParams();
+  p.set('mode', m||'year');
+  if(year) p.set('year', year);
+  window.location.href='?'+p.toString();
+}
+
+function colorScale(t,isDiff){
+  const stops=isDiff
+    ?[[33,102,172],[103,169,207],[209,229,240],[247,247,247],[253,219,199],[239,138,98],[178,24,43]]
+    :[[0,0,255],[0,128,255],[0,255,255],[0,255,128],[255,255,0],[255,128,0],[255,0,0]];
+  const n=stops.length-1;
+  const i=Math.min(Math.floor(t*n),n-1);
+  const f=t*n-i;
+  const a=stops[i],b=stops[Math.min(i+1,n)];
+  return [Math.round(a[0]+(b[0]-a[0])*f),Math.round(a[1]+(b[1]-a[1])*f),Math.round(a[2]+(b[2]-a[2])*f)];
+}
+
+function getValidValues(gr){
+  const band=gr.values[0];
+  const valid=[];
+  for(let r=0;r<band.length;r++){
+    const row=band[r];
+    for(let c=0;c<row.length;c++){
+      const v=row[c];
+      if(v!==null&&!isNaN(v)&&isFinite(v)) valid.push(v);
+    }
+  }
+  return valid;
+}
+
+function buildYearButtons(){
+  const c=document.getElementById('yearButtons');
+  for(let y=2015;y<=2024;y++){
+    const b=document.createElement('button');
+    b.textContent=y; b.className='yearBtn'; b.id='btn'+y;
+    if(UNAVAILABLE.includes(y)){
+      b.classList.add('disabled');
+      b.onclick=()=>document.getElementById('infoBar').textContent='Sin suficientes imágenes para '+y;
+    } else {
+      b.onclick=()=>navigate(y,'year');
+      if(mode==='year'&&y===currentYear) b.classList.add('active');
+    }
+    c.appendChild(b);
+  }
+  const btnDiff=document.getElementById('btnDiff');
+  btnDiff.onclick=()=>navigate(null,'diff');
+  if(mode==='diff') btnDiff.classList.add('active');
+}
+
+async function loadRaster(){
+  const isDiff=mode==='diff';
+  const url=isDiff?BASE+'LST_diff_2015_2024.tif':BASE+'LST_'+currentYear+'.tif';
+  const msg=document.getElementById('loadingMsg');
+  msg.style.display='flex'; msg.textContent='Cargando...';
+  try{
+    const resp=await fetch(url,{cache:'no-store'});
+    if(!resp.ok) throw new Error('HTTP '+resp.status);
+    const ab=await resp.arrayBuffer();
+    const gr=await parseGeoraster(ab);
+
+    const valid=getValidValues(gr).sort((a,b)=>a-b);
+    if(valid.length===0) throw new Error('Sin valores válidos');
+    const min=valid[Math.floor(valid.length*0.02)];
+    const max=valid[Math.floor(valid.length*0.98)];
+    const mid=(min+max)/2;
+    const range=max-min||1;
+
+    document.getElementById('legendMin').textContent=min.toFixed(1);
+    document.getElementById('legendMid').textContent=mid.toFixed(1);
+    document.getElementById('legendMax').textContent=max.toFixed(1);
+    document.getElementById('legendTitle').textContent=isDiff?'Δ LST (°C)':'LST (°C)';
+    document.getElementById('legendBar').style.background=isDiff
+      ?'linear-gradient(to right,#2166ac,#92c5de,#f7f7f7,#f4a582,#b2182b)'
+      :'linear-gradient(to right,#0000ff,#00ffff,#ffff00,#ff8000,#ff0000)';
+
+    const map=L.map('mapEl',{center:[-2.3,-78.12],zoom:13});
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      attribution:'© OpenStreetMap',maxZoom:19
+    }).addTo(map);
+
+    const layer=new GeoRasterLayer({
+      georaster:gr, opacity:0.82,
+      pixelValuesToColorFn:vals=>{
+        const v=vals[0];
+        if(v===null||isNaN(v)||!isFinite(v)) return null;
+        const t=Math.max(0,Math.min(1,(v-min)/range));
+        const [r,g,b]=colorScale(t,isDiff);
+        return `rgba(${r},${g},${b},0.85)`;
+      },
+      resolution:256
+    });
+    layer.addTo(map);
+    msg.style.display='none';
+    document.getElementById('infoBar').textContent=isDiff
+      ?'Diferencia LST: 2024 − 2015. Azul = enfriamiento, rojo = calentamiento.'
+      :'LST media anual '+currentYear+' — '+min.toFixed(1)+'°C a '+max.toFixed(1)+'°C';
+  }catch(e){
+    msg.textContent='Error: '+e.message;
+  }
+}
+
+buildYearButtons();
+loadRaster();
+</script>
+</body>
+</html>
